@@ -70,8 +70,7 @@
     "tsc-watch": "^6.2.0",
     "turbo": "2.3.3",
     "typescript": "*",
-    "zx": "^8.1.4",
-    "crypto-js": "^4.1.1"
+    "zx": "^8.1.4"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
