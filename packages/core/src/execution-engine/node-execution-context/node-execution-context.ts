@@ -1,5 +1,7 @@
+import { Logger } from '@n8n/backend-common';
+import { Memoized } from '@n8n/decorators';
 import { Container } from '@n8n/di';
-import { get } from 'lodash';
+import get from 'lodash/get';
 import type {
 	FunctionsBase,
 	ICredentialDataDecryptedObject,
@@ -15,6 +17,7 @@ import type {
 	IRunExecutionData,
 	IWorkflowExecuteAdditionalData,
 	NodeConnectionType,
+	NodeInputConnections,
 	NodeParameterValueType,
 	NodeTypeAndVersion,
 	Workflow,
@@ -22,16 +25,19 @@ import type {
 } from 'n8n-workflow';
 import {
 	ApplicationError,
+	CHAT_TRIGGER_NODE_TYPE,
 	deepCopy,
 	ExpressionError,
 	NodeHelpers,
 	NodeOperationError,
 } from 'n8n-workflow';
 
-import { HTTP_REQUEST_NODE_TYPE, HTTP_REQUEST_TOOL_NODE_TYPE } from '@/constants';
-import { Memoized } from '@/decorators';
+import {
+	HTTP_REQUEST_AS_TOOL_NODE_TYPE,
+	HTTP_REQUEST_NODE_TYPE,
+	HTTP_REQUEST_TOOL_NODE_TYPE,
+} from '@/constants';
 import { InstanceSettings } from '@/instance-settings';
-import { Logger } from '@/logging/logger';
 
 import { cleanupParameterData } from './utils/cleanup-parameter-data';
 import { ensureType } from './utils/ensure-type';
@@ -101,20 +107,41 @@ export abstract class NodeExecutionContext implements Omit<FunctionsBase, 'getCr
 		return output;
 	}
 
-	getParentNodes(nodeName: string) {
+	getParentNodes(nodeName: string, options?: { includeNodeParameters?: boolean }) {
 		const output: NodeTypeAndVersion[] = [];
 		const nodeNames = this.workflow.getParentNodes(nodeName);
 
 		for (const n of nodeNames) {
 			const node = this.workflow.nodes[n];
-			output.push({
+			const entry: NodeTypeAndVersion = {
 				name: node.name,
 				type: node.type,
 				typeVersion: node.typeVersion,
 				disabled: node.disabled ?? false,
-			});
+			};
+
+			if (options?.includeNodeParameters) {
+				entry.parameters = node.parameters;
+			}
+
+			output.push(entry);
 		}
 		return output;
+	}
+
+	/**
+	 * Gets the chat trigger node
+	 *
+	 * this is needed for sub-nodes where the parent nodes are not available
+	 */
+	getChatTrigger() {
+		for (const node of Object.values(this.workflow.nodes)) {
+			if (this.workflow.nodes[node.name].type === CHAT_TRIGGER_NODE_TYPE) {
+				return this.workflow.nodes[node.name];
+			}
+		}
+
+		return null;
 	}
 
 	@Memoized
@@ -147,6 +174,10 @@ export abstract class NodeExecutionContext implements Omit<FunctionsBase, 'getCr
 			.map((nodeName) => this.workflow.getNode(nodeName))
 			.filter((node) => !!node)
 			.filter((node) => node.disabled !== true);
+	}
+
+	getConnections(destination: INode, connectionType: NodeConnectionType): NodeInputConnections {
+		return this.workflow.connectionsByDestinationNode[destination.name]?.[connectionType] ?? [];
 	}
 
 	getNodeOutputs(): INodeOutputConfiguration[] {
@@ -190,7 +221,11 @@ export abstract class NodeExecutionContext implements Omit<FunctionsBase, 'getCr
 
 		// Hardcode for now for security reasons that only a single node can access
 		// all credentials
-		const fullAccess = [HTTP_REQUEST_NODE_TYPE, HTTP_REQUEST_TOOL_NODE_TYPE].includes(node.type);
+		const fullAccess = [
+			HTTP_REQUEST_NODE_TYPE,
+			HTTP_REQUEST_TOOL_NODE_TYPE,
+			HTTP_REQUEST_AS_TOOL_NODE_TYPE,
+		].includes(node.type);
 
 		let nodeCredentialDescription: INodeCredentialDescription | undefined;
 		if (!fullAccess) {
@@ -219,6 +254,7 @@ export abstract class NodeExecutionContext implements Omit<FunctionsBase, 'getCr
 					additionalData.currentNodeParameters || node.parameters,
 					nodeCredentialDescription,
 					node,
+					nodeType.description,
 					node.parameters,
 				)
 			) {
@@ -396,6 +432,8 @@ export abstract class NodeExecutionContext implements Omit<FunctionsBase, 'getCr
 				nodeCause: node.name,
 			});
 		}
+
+		if (options?.skipValidation) return returnData;
 
 		// Validate parameter value if it has a schema defined(RMC) or validateType defined
 		// eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
